@@ -3,7 +3,7 @@ import type { DrawSettings, Point } from '../types';
 import {
   applyCtxSettings,
   drawSmoothPath,
-  drawRawPath,
+  // drawRawPath,
   drawShapeOnCanvas,
   recognizeShape,
   drawRecognizedShape,
