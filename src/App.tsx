@@ -12,10 +12,12 @@ export default function App() {
 
   const {
     canvasRef,
+    overlayRef,
     onPointerDown, onPointerMove, onPointerUp,
     undo, redo, clear, exportPNG,
     canUndo, canRedo,
     isPlacingText, textPos, placeText, cancelText,
+    selection, exportSelection, deleteSelection, clearSelection,
   } = useDrawingCanvas(settings);
 
   return (
@@ -42,6 +44,7 @@ export default function App() {
       />
       <DrawingCanvas
         canvasRef={canvasRef}
+        overlayRef={overlayRef}
         tool={settings.tool}
         settings={settings}
         isPlacingText={isPlacingText}
@@ -51,6 +54,10 @@ export default function App() {
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
+        selection={selection}
+        onExportSelection={exportSelection}
+        onDeleteSelection={deleteSelection}
+        onClearSelection={clearSelection}
       />
       <StatusBar tool={settings.tool} mode={settings.mode} />
     </div>

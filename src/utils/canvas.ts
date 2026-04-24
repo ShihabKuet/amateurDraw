@@ -55,7 +55,7 @@ export type RecognizedShape =
   | { type: 'triangle'; pts: [Point, Point, Point] };
 
 export function recognizeShape(pts: Point[]): RecognizedShape | null {
-  if (pts.length < 4) return null;
+  if (pts.length < 6) return null;
 
   const xs = pts.map((p) => p.x);
   const ys = pts.map((p) => p.y);
@@ -64,54 +64,101 @@ export function recognizeShape(pts: Point[]): RecognizedShape | null {
   const w = maxX - minX;
   const h = maxY - minY;
 
-  if (w < 8 && h < 8) return null;
+  if (w < 12 && h < 12) return null;
 
   const first = pts[0];
   const last = pts[pts.length - 1];
   const closedDist = distance(first, last);
   const span = Math.max(w, h);
-  const isClosed = closedDist < span * 0.35;
+
+  // Stricter closure test: end point must be within 18% of the bounding span
+  const isClosed = closedDist < span * 0.18;
 
   if (!isClosed) {
+    // Open stroke → straight line (connect first to last)
     return { type: 'line', x1: first.x, y1: first.y, x2: last.x, y2: last.y };
   }
 
-  // Check if triangle-ish: find the point farthest from the midline
-  const cx = (minX + maxX) / 2;
-  const cy = (minY + maxY) / 2;
-  let apex: Point = pts[0];
-  let maxDist = 0;
-  pts.forEach((p) => {
-    const d = distance(p, { x: cx, y: cy });
-    if (d > maxDist) { maxDist = d; apex = p; }
-  });
+  // ── Closed shape: determine rect vs ellipse vs triangle ──────────────────
 
-  // Heuristic: if aspect ratio allows and apex is near top or bottom
-  const aspect = w / (h + 0.001);
-  const apexNearTopOrBottom = apex.y < minY + h * 0.3 || apex.y > maxY - h * 0.3;
+  // Count corners (sharp turns) in the stroke
+  const cornerCount = countCorners(pts);
 
-  if (apexNearTopOrBottom && aspect > 0.4 && aspect < 3.5) {
-    // Triangle
-    const bl: Point = { x: minX, y: maxY };
-    const br: Point = { x: maxX, y: maxY };
-    const top: Point = { x: (minX + maxX) / 2, y: minY };
-    const apexPt = apex.y < cy ? top : { x: (minX + maxX) / 2, y: maxY };
-    const base1 = apex.y < cy ? bl : { x: minX, y: minY };
-    const base2 = apex.y < cy ? br : { x: maxX, y: minY };
-    return { type: 'triangle', pts: [apexPt, base1, base2] };
+  // Triangle: exactly ~3 corners, and the stroke has 3 clear vertices
+  if (cornerCount >= 2 && cornerCount <= 4) {
+    const verts = findVertices(pts, 3);
+    if (verts) {
+      return { type: 'triangle', pts: verts };
+    }
   }
 
-  // Ellipse vs Rect: if corners are present, rect wins
-  const cornerTest = cornersPresent(pts, minX, minY, maxX, maxY);
-  if (cornerTest) {
+  // Rect: 4 corners present near bounding-box corners
+  const hasBoxCorners = cornersPresent(pts, minX, minY, maxX, maxY);
+  if (hasBoxCorners || cornerCount >= 3) {
     return { type: 'rect', x: minX, y: minY, w, h };
   }
 
+  // Default: ellipse
   return { type: 'ellipse', cx: (minX + maxX) / 2, cy: (minY + maxY) / 2, rx: w / 2, ry: h / 2 };
 }
 
+/** Count direction-change corners in a stroke (sharp angular changes). */
+function countCorners(pts: Point[]): number {
+  if (pts.length < 5) return 0;
+  const step = Math.max(1, Math.floor(pts.length / 40));
+  let corners = 0;
+  for (let i = step; i < pts.length - step; i += step) {
+    const prev = pts[i - step];
+    const curr = pts[i];
+    const next = pts[i + step];
+    const a1 = Math.atan2(curr.y - prev.y, curr.x - prev.x);
+    const a2 = Math.atan2(next.y - curr.y, next.x - curr.x);
+    let diff = Math.abs(a2 - a1);
+    if (diff > Math.PI) diff = 2 * Math.PI - diff;
+    if (diff > 0.55) corners++; // ~31° threshold
+  }
+  return corners;
+}
+
+/** Find the N most extreme vertices of a stroke by curvature / direction change. */
+function findVertices(pts: Point[], n: number): [Point, Point, Point] | null {
+  if (pts.length < 10) return null;
+  const step = Math.max(1, Math.floor(pts.length / 60));
+  const scored: Array<{ idx: number; score: number }> = [];
+
+  for (let i = step * 2; i < pts.length - step * 2; i += step) {
+    const prev = pts[i - step * 2];
+    const curr = pts[i];
+    const next = pts[i + step * 2];
+    const a1 = Math.atan2(curr.y - prev.y, curr.x - prev.x);
+    const a2 = Math.atan2(next.y - curr.y, next.x - curr.x);
+    let diff = Math.abs(a2 - a1);
+    if (diff > Math.PI) diff = 2 * Math.PI - diff;
+    if (diff > 0.5) scored.push({ idx: i, score: diff });
+  }
+
+  if (scored.length < n - 1) return null;
+
+  // Deduplicate: keep highest score per cluster
+  scored.sort((a, b) => b.score - a.score);
+  const minGap = Math.floor(pts.length / (n * 1.5));
+  const picked: number[] = [];
+  for (const s of scored) {
+    if (picked.every((p) => Math.abs(p - s.idx) > minGap)) {
+      picked.push(s.idx);
+      if (picked.length === n - 1) break; // we also include first point
+    }
+  }
+  if (picked.length < n - 1) return null;
+
+  const allVerts = [0, ...picked].map((i) => pts[i]);
+  if (allVerts.length < 3) return null;
+  return [allVerts[0], allVerts[1], allVerts[2]];
+}
+
 function cornersPresent(pts: Point[], minX: number, minY: number, maxX: number, maxY: number): boolean {
-  const threshold = Math.max((maxX - minX), (maxY - minY)) * 0.25;
+  // Threshold: a point is "at a corner" if within 22% of bounding box size
+  const threshold = Math.max((maxX - minX), (maxY - minY)) * 0.22;
   const corners = [
     { x: minX, y: minY }, { x: maxX, y: minY },
     { x: minX, y: maxY }, { x: maxX, y: maxY },
@@ -120,7 +167,8 @@ function cornersPresent(pts: Point[], minX: number, minY: number, maxX: number, 
   corners.forEach((c) => {
     if (pts.some((p) => distance(p, c) < threshold)) found++;
   });
-  return found >= 3;
+  // Need all 4 corners for rect confidence
+  return found >= 4;
 }
 
 export function drawRecognizedShape(ctx: CanvasRenderingContext2D, shape: RecognizedShape): void {
@@ -244,6 +292,35 @@ export function exportCanvasAsPNG(canvas: HTMLCanvasElement, filename = 'amateur
   a.click();
 }
 
-export function exportCanvasAsSVG(_canvas: HTMLCanvasElement): void {
-  alert('SVG export coming soon! Use PNG for now.');
+export function exportSelectionAsPNG(
+  canvas: HTMLCanvasElement,
+  x: number, y: number, w: number, h: number,
+  filename = 'amateurDraw-selection.png'
+): void {
+  const tmp = document.createElement('canvas');
+  tmp.width = Math.abs(w);
+  tmp.height = Math.abs(h);
+  const tc = tmp.getContext('2d')!;
+  tc.fillStyle = '#ffffff';
+  tc.fillRect(0, 0, tmp.width, tmp.height);
+  const sx = w < 0 ? x + w : x;
+  const sy = h < 0 ? y + h : y;
+  tc.drawImage(canvas, sx, sy, Math.abs(w), Math.abs(h), 0, 0, Math.abs(w), Math.abs(h));
+  const a = document.createElement('a');
+  a.download = filename;
+  a.href = tmp.toDataURL('image/png');
+  a.click();
+}
+
+export function clearSelectionOnCanvas(
+  ctx: CanvasRenderingContext2D,
+  x: number, y: number, w: number, h: number
+): void {
+  const sx = w < 0 ? x + w : x;
+  const sy = h < 0 ? y + h : y;
+  const prevOp = ctx.globalCompositeOperation;
+  ctx.globalCompositeOperation = 'destination-out';
+  ctx.fillStyle = 'rgba(0,0,0,1)';
+  ctx.fillRect(sx, sy, Math.abs(w), Math.abs(h));
+  ctx.globalCompositeOperation = prevOp;
 }

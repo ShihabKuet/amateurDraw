@@ -3,19 +3,29 @@ import type { DrawSettings, Point } from '../types';
 import {
   applyCtxSettings,
   drawSmoothPath,
-  // drawRawPath,
   drawShapeOnCanvas,
   recognizeShape,
   drawRecognizedShape,
   getEventPoint,
   exportCanvasAsPNG,
+  exportSelectionAsPNG,
+  clearSelectionOnCanvas,
 } from '../utils/canvas';
 
 const SHAPE_TOOLS = new Set(['line', 'rect', 'ellipse', 'triangle', 'arrow']);
 const MAX_UNDO = 50;
 
+export interface SelectionRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 export function useDrawingCanvas(settings: DrawSettings) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const overlayRef = useRef<HTMLCanvasElement>(null);
+
   const isDrawing = useRef(false);
   const points = useRef<Point[]>([]);
   const shapeStart = useRef<Point | null>(null);
@@ -28,13 +38,57 @@ export function useDrawingCanvas(settings: DrawSettings) {
   const [canRedo, setCanRedo] = useState(false);
   const [isPlacingText, setIsPlacingText] = useState(false);
   const [textPos, setTextPos] = useState<Point | null>(null);
-
-  useEffect(() => {
-    settingsRef.current = settings;
-  }, [settings]);
+  const [selection, setSelection] = useState<SelectionRect | null>(null);
+  const selectionRef = useRef<SelectionRect | null>(null);
 
   const getCtx = useCallback((): CanvasRenderingContext2D | null => {
     return canvasRef.current?.getContext('2d') ?? null;
+  }, []);
+
+  const clearOverlay = useCallback(() => {
+    const oc = overlayRef.current;
+    if (!oc) return;
+    const ctx = oc.getContext('2d');
+    ctx?.clearRect(0, 0, oc.width, oc.height);
+  }, []);
+
+  const drawSelectionMarquee = useCallback((rect: SelectionRect) => {
+    const oc = overlayRef.current;
+    if (!oc) return;
+    const ctx = oc.getContext('2d')!;
+    ctx.clearRect(0, 0, oc.width, oc.height);
+
+    const x = rect.w < 0 ? rect.x + rect.w : rect.x;
+    const y = rect.h < 0 ? rect.y + rect.h : rect.y;
+    const w = Math.abs(rect.w);
+    const h = Math.abs(rect.h);
+
+    ctx.fillStyle = 'rgba(0,0,0,0.15)';
+    ctx.fillRect(0, 0, oc.width, oc.height);
+    ctx.clearRect(x, y, w, h);
+
+    ctx.save();
+    ctx.strokeStyle = '#3b82f6';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([6, 4]);
+    ctx.strokeRect(x + 0.75, y + 0.75, w - 1.5, h - 1.5);
+    ctx.restore();
+
+    const handles = [
+      [x, y], [x + w, y], [x, y + h], [x + w, y + h],
+      [x + w / 2, y], [x + w / 2, y + h],
+      [x, y + h / 2], [x + w, y + h / 2],
+    ];
+    ctx.setLineDash([]);
+    handles.forEach(([hx, hy]) => {
+      ctx.beginPath();
+      ctx.arc(hx, hy, 4.5, 0, Math.PI * 2);
+      ctx.fillStyle = '#fff';
+      ctx.fill();
+      ctx.strokeStyle = '#3b82f6';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    });
   }, []);
 
   const saveSnapshot = useCallback((): ImageData | null => {
@@ -84,16 +138,53 @@ export function useDrawingCanvas(settings: DrawSettings) {
     if (!ctx || !canvas) return;
     pushUndo();
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-  }, [getCtx, pushUndo]);
+    clearOverlay();
+    setSelection(null);
+    selectionRef.current = null;
+  }, [getCtx, pushUndo, clearOverlay]);
 
   const exportPNG = useCallback(() => {
     if (canvasRef.current) exportCanvasAsPNG(canvasRef.current);
   }, []);
 
-  // Resize canvas on window resize while preserving content
+  const exportSelection = useCallback(() => {
+    const sel = selectionRef.current;
+    if (!sel || !canvasRef.current) return;
+    exportSelectionAsPNG(canvasRef.current, sel.x, sel.y, sel.w, sel.h);
+  }, []);
+
+  const deleteSelection = useCallback(() => {
+    const sel = selectionRef.current;
+    const ctx = getCtx();
+    if (!sel || !ctx) return;
+    pushUndo();
+    clearSelectionOnCanvas(ctx, sel.x, sel.y, sel.w, sel.h);
+    clearOverlay();
+    setSelection(null);
+    selectionRef.current = null;
+  }, [getCtx, pushUndo, clearOverlay]);
+
+  const clearSelection = useCallback(() => {
+    clearOverlay();
+    setSelection(null);
+    selectionRef.current = null;
+  }, [clearOverlay]);
+
+  // Clear selection when switching away from select tool
+  useEffect(() => {
+    if (settings.tool !== 'select') {
+      clearOverlay();
+      setSelection(null);
+      selectionRef.current = null;
+    }
+    settingsRef.current = settings;
+  }, [settings, clearOverlay]);
+
+  // Resize observer
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    const overlay = overlayRef.current;
+    if (!canvas || !overlay) return;
     const parent = canvas.parentElement;
     if (!parent) return;
 
@@ -102,11 +193,15 @@ export function useDrawingCanvas(settings: DrawSettings) {
       const snapshot = ctx.getImageData(0, 0, canvas.width, canvas.height);
       canvas.width = parent.clientWidth;
       canvas.height = parent.clientHeight;
+      overlay.width = parent.clientWidth;
+      overlay.height = parent.clientHeight;
       ctx.putImageData(snapshot, 0, 0);
     });
     ro.observe(parent);
     canvas.width = parent.clientWidth;
     canvas.height = parent.clientHeight;
+    overlay.width = parent.clientWidth;
+    overlay.height = parent.clientHeight;
     return () => ro.disconnect();
   }, []);
 
@@ -114,25 +209,46 @@ export function useDrawingCanvas(settings: DrawSettings) {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
+      if (isPlacingText) return;
       if (mod && e.key === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
       if (mod && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) { e.preventDefault(); redo(); }
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectionRef.current) {
+        e.preventDefault();
+        deleteSelection();
+      }
+      if (e.key === 'Escape' && selectionRef.current) {
+        clearSelection();
+      }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [undo, redo]);
+  }, [undo, redo, deleteSelection, clearSelection, isPlacingText]);
 
   const onPointerDown = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
     const ctx = getCtx();
     if (!canvas || !ctx) return;
-    canvas.setPointerCapture(e.pointerId);
 
     const s = settingsRef.current;
     const pos = getEventPoint(e.nativeEvent, canvas);
 
+    // Text tool — show text overlay, do NOT capture pointer
     if (s.tool === 'text') {
+      setTextPos({ ...pos });
       setIsPlacingText(true);
-      setTextPos(pos);
+      return;
+    }
+
+    canvas.setPointerCapture(e.pointerId);
+
+    // Select tool — start marquee
+    if (s.tool === 'select') {
+      clearOverlay();
+      setSelection(null);
+      selectionRef.current = null;
+      isDrawing.current = true;
+      shapeStart.current = { ...pos };
+      points.current = [pos];
       return;
     }
 
@@ -140,7 +256,7 @@ export function useDrawingCanvas(settings: DrawSettings) {
     points.current = [pos];
 
     if (SHAPE_TOOLS.has(s.tool)) {
-      shapeStart.current = pos;
+      shapeStart.current = { ...pos };
       snapshotBeforeShape.current = saveSnapshot();
       return;
     }
@@ -151,7 +267,7 @@ export function useDrawingCanvas(settings: DrawSettings) {
     ctx.moveTo(pos.x, pos.y);
     ctx.lineTo(pos.x + 0.1, pos.y);
     ctx.stroke();
-  }, [getCtx, saveSnapshot, pushUndo]);
+  }, [getCtx, saveSnapshot, pushUndo, clearOverlay]);
 
   const onPointerMove = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!isDrawing.current) return;
@@ -163,21 +279,25 @@ export function useDrawingCanvas(settings: DrawSettings) {
     const pos = getEventPoint(e.nativeEvent, canvas);
     points.current.push(pos);
 
-    if (SHAPE_TOOLS.has(s.tool)) {
-      // Restore snapshot and draw preview
-      if (snapshotBeforeShape.current) {
-        ctx.putImageData(snapshotBeforeShape.current, 0, 0);
-      }
+    if (s.tool === 'select' && shapeStart.current) {
+      drawSelectionMarquee({
+        x: shapeStart.current.x, y: shapeStart.current.y,
+        w: pos.x - shapeStart.current.x, h: pos.y - shapeStart.current.y,
+      });
+      return;
+    }
+
+    if (SHAPE_TOOLS.has(s.tool) && shapeStart.current) {
+      if (snapshotBeforeShape.current) ctx.putImageData(snapshotBeforeShape.current, 0, 0);
       applyCtxSettings(ctx, s.tool, s.color, s.size, s.opacity);
       ctx.fillStyle = s.fillShape ? s.color + '33' : 'transparent';
-      drawShapeOnCanvas(ctx, s.tool, shapeStart.current!, pos, s.fillShape);
+      drawShapeOnCanvas(ctx, s.tool, shapeStart.current, pos, s.fillShape);
       return;
     }
 
     applyCtxSettings(ctx, s.tool, s.color, s.size, s.opacity);
 
     if (s.mode === 'smooth') {
-      // Redraw last few points smoothly
       const recent = points.current.slice(-4);
       if (recent.length >= 2) {
         ctx.beginPath();
@@ -190,9 +310,9 @@ export function useDrawingCanvas(settings: DrawSettings) {
       ctx.beginPath();
       ctx.moveTo(pos.x, pos.y);
     }
-  }, [getCtx]);
+  }, [getCtx, drawSelectionMarquee]);
 
-  const onPointerUp = useCallback((_e: React.PointerEvent<HTMLCanvasElement>) => {
+  const onPointerUp = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!isDrawing.current) return;
     isDrawing.current = false;
 
@@ -201,24 +321,51 @@ export function useDrawingCanvas(settings: DrawSettings) {
     if (!canvas || !ctx) return;
 
     const s = settingsRef.current;
+    const pos = getEventPoint(e.nativeEvent, canvas);
 
-    if (SHAPE_TOOLS.has(s.tool)) {
-      pushUndo();
-      if (snapshotBeforeShape.current) {
-        ctx.putImageData(snapshotBeforeShape.current, 0, 0);
+    // Finalize selection marquee
+    if (s.tool === 'select' && shapeStart.current) {
+      const raw: SelectionRect = {
+        x: shapeStart.current.x,
+        y: shapeStart.current.y,
+        w: pos.x - shapeStart.current.x,
+        h: pos.y - shapeStart.current.y,
+      };
+      if (Math.abs(raw.w) > 4 && Math.abs(raw.h) > 4) {
+        const normalized: SelectionRect = {
+          x: raw.w < 0 ? raw.x + raw.w : raw.x,
+          y: raw.h < 0 ? raw.y + raw.h : raw.y,
+          w: Math.abs(raw.w),
+          h: Math.abs(raw.h),
+        };
+        setSelection(normalized);
+        selectionRef.current = normalized;
+        drawSelectionMarquee(normalized);
+      } else {
+        clearOverlay();
+        setSelection(null);
+        selectionRef.current = null;
       }
+      shapeStart.current = null;
+      points.current = [];
+      return;
+    }
+
+    if (SHAPE_TOOLS.has(s.tool) && shapeStart.current) {
+      pushUndo();
+      if (snapshotBeforeShape.current) ctx.putImageData(snapshotBeforeShape.current, 0, 0);
       applyCtxSettings(ctx, s.tool, s.color, s.size, s.opacity);
       ctx.fillStyle = s.fillShape ? s.color + '33' : 'transparent';
-      const endPos = points.current[points.current.length - 1] ?? shapeStart.current!;
-      drawShapeOnCanvas(ctx, s.tool, shapeStart.current!, endPos, s.fillShape);
+      const endPos = points.current[points.current.length - 1] ?? shapeStart.current;
+      drawShapeOnCanvas(ctx, s.tool, shapeStart.current, endPos, s.fillShape);
       shapeStart.current = null;
       snapshotBeforeShape.current = null;
       points.current = [];
       return;
     }
 
-    // Smooth mode: finalize stroke
-    if (s.mode === 'smooth' && s.tool !== 'eraser' && s.tool !== 'highlighter' && points.current.length > 4) {
+    // Smooth mode finalization
+    if (s.mode === 'smooth' && s.tool !== 'eraser' && s.tool !== 'highlighter' && points.current.length > 6) {
       const undoSnap = undoStack.current[undoStack.current.length - 1];
       if (undoSnap) {
         ctx.putImageData(undoSnap, 0, 0);
@@ -240,22 +387,29 @@ export function useDrawingCanvas(settings: DrawSettings) {
     }
 
     points.current = [];
-  }, [getCtx, pushUndo]);
+  }, [getCtx, pushUndo, drawSelectionMarquee, clearOverlay]);
 
   const placeText = useCallback((text: string, pos: Point) => {
     const ctx = getCtx();
-    if (!ctx || !text.trim()) { setIsPlacingText(false); setTextPos(null); return; }
+    if (!ctx || !text.trim()) {
+      setIsPlacingText(false);
+      setTextPos(null);
+      return;
+    }
     const s = settingsRef.current;
     pushUndo();
+    ctx.save();
     ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = s.opacity;
     ctx.fillStyle = s.color;
-    ctx.font = `${s.size * 3 + 10}px Inter, system-ui, sans-serif`;
+    const fontSize = Math.max(14, s.size * 3 + 10);
+    ctx.font = `${fontSize}px Inter, system-ui, sans-serif`;
     ctx.textBaseline = 'top';
+    const lineHeight = fontSize * 1.35;
     text.split('\n').forEach((line, i) => {
-      ctx.fillText(line, pos.x, pos.y + i * (s.size * 3 + 14));
+      ctx.fillText(line, pos.x, pos.y + i * lineHeight);
     });
-    ctx.globalAlpha = 1;
+    ctx.restore();
     setIsPlacingText(false);
     setTextPos(null);
   }, [getCtx, pushUndo]);
@@ -267,6 +421,7 @@ export function useDrawingCanvas(settings: DrawSettings) {
 
   return {
     canvasRef,
+    overlayRef,
     onPointerDown,
     onPointerMove,
     onPointerUp,
@@ -280,5 +435,9 @@ export function useDrawingCanvas(settings: DrawSettings) {
     textPos,
     placeText,
     cancelText,
+    selection,
+    exportSelection,
+    deleteSelection,
+    clearSelection,
   };
 }

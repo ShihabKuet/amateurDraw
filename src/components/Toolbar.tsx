@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import {
-  Pen, PenLine, Highlighter, Eraser, Type,
+  Pen, PenLine, Highlighter, Eraser, Type, MousePointer2,
   Minus, Square, Circle, Triangle, ArrowRight,
   Undo2, Redo2, Trash2, Download, ChevronDown,
   Sparkles, Settings2,
@@ -41,6 +41,7 @@ type ToolGroup = {
 };
 
 const DRAW_TOOLS: ToolGroup[] = [
+  { id: 'select', label: 'Select (marquee)', icon: <MousePointer2 size={16} /> },
   { id: 'pen', label: 'Pen', icon: <Pen size={16} /> },
   { id: 'pencil', label: 'Pencil', icon: <PenLine size={16} /> },
   { id: 'highlighter', label: 'Highlighter', icon: <Highlighter size={16} /> },
