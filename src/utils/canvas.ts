@@ -1,50 +1,185 @@
-import type { Point, ToolType } from '../types';
+import type { Point, ToolType, DrawObject, StrokeObject, ShapeObject, TextObject, BBox } from '../types';
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 export function hexToRgba(hex: string, alpha: number): string {
   const r = parseInt(hex.slice(1, 3), 16);
   const g = parseInt(hex.slice(3, 5), 16);
   const b = parseInt(hex.slice(5, 7), 16);
-  return `rgba(${r},${g},${b},${alpha})`;
+  return `rgba(${r},${g},${b},${Math.max(0, Math.min(1, alpha))})`;
 }
 
-export function getEventPoint(e: MouseEvent | TouchEvent, canvas: HTMLCanvasElement): Point {
+export function getEventPoint(e: MouseEvent | TouchEvent | PointerEvent, canvas: HTMLCanvasElement): Point {
   const rect = canvas.getBoundingClientRect();
-  const src = 'touches' in e ? e.touches[0] : e;
-  return {
-    x: src.clientX - rect.left,
-    y: src.clientY - rect.top,
-  };
+  const src = 'touches' in e ? (e as TouchEvent).touches[0] : e as PointerEvent;
+  return { x: src.clientX - rect.left, y: src.clientY - rect.top };
 }
 
 export function distance(a: Point, b: Point): number {
   return Math.hypot(b.x - a.x, b.y - a.y);
 }
 
-// Catmull-Rom smoothing
+export function uid(): string {
+  return Math.random().toString(36).slice(2, 10);
+}
+
+// ── BBox ─────────────────────────────────────────────────────────────────────
+
+export function bboxFromPoints(pts: Point[], pad = 0): BBox {
+  const xs = pts.map(p => p.x);
+  const ys = pts.map(p => p.y);
+  const x = Math.min(...xs) - pad;
+  const y = Math.min(...ys) - pad;
+  return { x, y, w: Math.max(...xs) - x + pad * 2 - pad, h: Math.max(...ys) - y + pad * 2 - pad };
+}
+
+export function bboxFromShape(x1: number, y1: number, x2: number, y2: number): BBox {
+  const x = Math.min(x1, x2);
+  const y = Math.min(y1, y2);
+  return { x, y, w: Math.abs(x2 - x1), h: Math.abs(y2 - y1) };
+}
+
+export function bboxContains(bbox: BBox, pt: Point): boolean {
+  return pt.x >= bbox.x && pt.x <= bbox.x + bbox.w &&
+         pt.y >= bbox.y && pt.y <= bbox.y + bbox.h;
+}
+
+// ── Rendering ─────────────────────────────────────────────────────────────────
+
+function applyBaseCtx(ctx: CanvasRenderingContext2D, obj: DrawObject) {
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.globalCompositeOperation = 'source-over';
+
+  if (obj.kind === 'stroke') {
+    if (obj.tool === 'eraser') {
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.strokeStyle = 'rgba(0,0,0,1)';
+      ctx.lineWidth = obj.size * 2.5;
+      ctx.globalAlpha = 1;
+    } else if (obj.tool === 'highlighter') {
+      ctx.strokeStyle = hexToRgba(obj.color, 0.28);
+      ctx.lineWidth = obj.size * 5;
+      ctx.globalAlpha = obj.opacity;
+    } else if (obj.tool === 'pencil') {
+      ctx.strokeStyle = hexToRgba(obj.color, 0.65 * obj.opacity);
+      ctx.lineWidth = Math.max(1, obj.size * 0.75);
+      ctx.globalAlpha = 1;
+    } else {
+      ctx.strokeStyle = hexToRgba(obj.color, obj.opacity);
+      ctx.lineWidth = obj.size;
+      ctx.globalAlpha = 1;
+    }
+  } else if (obj.kind === 'shape') {
+    ctx.strokeStyle = hexToRgba(obj.color, obj.opacity);
+    ctx.lineWidth = obj.size;
+    ctx.globalAlpha = 1;
+    if (obj.fill) ctx.fillStyle = hexToRgba(obj.color, obj.opacity * 0.2);
+  } else if (obj.kind === 'text') {
+    ctx.fillStyle = hexToRgba(obj.color, obj.opacity);
+    ctx.globalAlpha = 1;
+  }
+}
+
+export function renderObject(ctx: CanvasRenderingContext2D, obj: DrawObject) {
+  applyBaseCtx(ctx, obj);
+
+  if (obj.kind === 'stroke') {
+    renderStroke(ctx, obj);
+  } else if (obj.kind === 'shape') {
+    renderShape(ctx, obj);
+  } else if (obj.kind === 'text') {
+    renderText(ctx, obj);
+  }
+
+  ctx.restore();
+}
+
+function renderStroke(ctx: CanvasRenderingContext2D, obj: StrokeObject) {
+  const pts = obj.points;
+  if (pts.length < 2) {
+    ctx.beginPath();
+    ctx.arc(pts[0].x, pts[0].y, ctx.lineWidth / 2, 0, Math.PI * 2);
+    ctx.fill();
+    return;
+  }
+  ctx.beginPath();
+  ctx.moveTo(pts[0].x, pts[0].y);
+  for (let i = 1; i < pts.length - 1; i++) {
+    const mx = (pts[i].x + pts[i + 1].x) / 2;
+    const my = (pts[i].y + pts[i + 1].y) / 2;
+    ctx.quadraticCurveTo(pts[i].x, pts[i].y, mx, my);
+  }
+  ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
+  ctx.stroke();
+}
+
+function renderShape(ctx: CanvasRenderingContext2D, obj: ShapeObject) {
+  const { x1, y1, x2, y2 } = obj;
+  const dx = x2 - x1, dy = y2 - y1;
+  ctx.beginPath();
+  switch (obj.shape) {
+    case 'line':
+      ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
+      break;
+    case 'rect':
+      ctx.rect(x1, y1, dx, dy);
+      break;
+    case 'ellipse':
+      ctx.ellipse(x1 + dx / 2, y1 + dy / 2, Math.abs(dx / 2), Math.abs(dy / 2), 0, 0, Math.PI * 2);
+      break;
+    case 'triangle':
+      ctx.moveTo(x1 + dx / 2, y1);
+      ctx.lineTo(x1, y2);
+      ctx.lineTo(x2, y2);
+      ctx.closePath();
+      break;
+    case 'arrow': {
+      const angle = Math.atan2(dy, dx);
+      const len = distance({ x: x1, y: y1 }, { x: x2, y: y2 });
+      const hw = Math.min(len * 0.35, 22);
+      ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
+      ctx.lineTo(x2 - hw * Math.cos(angle - 0.45), y2 - hw * Math.sin(angle - 0.45));
+      ctx.moveTo(x2, y2);
+      ctx.lineTo(x2 - hw * Math.cos(angle + 0.45), y2 - hw * Math.sin(angle + 0.45));
+      break;
+    }
+  }
+  ctx.stroke();
+  if (obj.fill && obj.shape !== 'line' && obj.shape !== 'arrow') ctx.fill();
+}
+
+function renderText(ctx: CanvasRenderingContext2D, obj: TextObject) {
+  ctx.font = `${obj.fontSize}px Inter, system-ui, sans-serif`;
+  ctx.textBaseline = 'top';
+  const lineHeight = obj.fontSize * 1.35;
+  obj.text.split('\n').forEach((line, i) => {
+    ctx.fillText(line, obj.x, obj.y + i * lineHeight);
+  });
+}
+
+// Re-render everything from object list
+export function renderAll(ctx: CanvasRenderingContext2D, objects: DrawObject[]) {
+  const canvas = ctx.canvas;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  for (const obj of objects) {
+    renderObject(ctx, obj);
+  }
+}
+
+// ── Smooth / shape recognition ────────────────────────────────────────────────
+
 export function drawSmoothPath(ctx: CanvasRenderingContext2D, pts: Point[]): void {
   if (pts.length < 2) return;
   ctx.beginPath();
   ctx.moveTo(pts[0].x, pts[0].y);
-  if (pts.length === 2) {
-    ctx.lineTo(pts[1].x, pts[1].y);
-  } else {
-    for (let i = 1; i < pts.length - 1; i++) {
-      const mx = (pts[i].x + pts[i + 1].x) / 2;
-      const my = (pts[i].y + pts[i + 1].y) / 2;
-      ctx.quadraticCurveTo(pts[i].x, pts[i].y, mx, my);
-    }
-    ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
+  for (let i = 1; i < pts.length - 1; i++) {
+    const mx = (pts[i].x + pts[i + 1].x) / 2;
+    const my = (pts[i].y + pts[i + 1].y) / 2;
+    ctx.quadraticCurveTo(pts[i].x, pts[i].y, mx, my);
   }
-  ctx.stroke();
-}
-
-export function drawRawPath(ctx: CanvasRenderingContext2D, pts: Point[]): void {
-  if (pts.length < 2) return;
-  ctx.beginPath();
-  ctx.moveTo(pts[0].x, pts[0].y);
-  for (let i = 1; i < pts.length; i++) {
-    ctx.lineTo(pts[i].x, pts[i].y);
-  }
+  ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
   ctx.stroke();
 }
 
@@ -56,134 +191,77 @@ export type RecognizedShape =
 
 export function recognizeShape(pts: Point[]): RecognizedShape | null {
   if (pts.length < 6) return null;
-
-  const xs = pts.map((p) => p.x);
-  const ys = pts.map((p) => p.y);
+  const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
   const minX = Math.min(...xs), maxX = Math.max(...xs);
   const minY = Math.min(...ys), maxY = Math.max(...ys);
-  const w = maxX - minX;
-  const h = maxY - minY;
-
+  const w = maxX - minX, h = maxY - minY;
   if (w < 12 && h < 12) return null;
 
-  const first = pts[0];
-  const last = pts[pts.length - 1];
-  const closedDist = distance(first, last);
-  const span = Math.max(w, h);
+  const first = pts[0], last = pts[pts.length - 1];
+  const isClosed = distance(first, last) < Math.max(w, h) * 0.18;
 
-  // Stricter closure test: end point must be within 18% of the bounding span
-  const isClosed = closedDist < span * 0.18;
+  if (!isClosed) return { type: 'line', x1: first.x, y1: first.y, x2: last.x, y2: last.y };
 
-  if (!isClosed) {
-    // Open stroke → straight line (connect first to last)
-    return { type: 'line', x1: first.x, y1: first.y, x2: last.x, y2: last.y };
-  }
-
-  // ── Closed shape: determine rect vs ellipse vs triangle ──────────────────
-
-  // Count corners (sharp turns) in the stroke
   const cornerCount = countCorners(pts);
-
-  // Triangle: exactly ~3 corners, and the stroke has 3 clear vertices
   if (cornerCount >= 2 && cornerCount <= 4) {
-    const verts = findVertices(pts, 3);
-    if (verts) {
-      return { type: 'triangle', pts: verts };
-    }
+    const verts = findVertices(pts);
+    if (verts) return { type: 'triangle', pts: verts };
   }
-
-  // Rect: 4 corners present near bounding-box corners
-  const hasBoxCorners = cornersPresent(pts, minX, minY, maxX, maxY);
-  if (hasBoxCorners || cornerCount >= 3) {
+  if (cornersPresent(pts, minX, minY, maxX, maxY) || cornerCount >= 3) {
     return { type: 'rect', x: minX, y: minY, w, h };
   }
-
-  // Default: ellipse
   return { type: 'ellipse', cx: (minX + maxX) / 2, cy: (minY + maxY) / 2, rx: w / 2, ry: h / 2 };
 }
 
-/** Count direction-change corners in a stroke (sharp angular changes). */
 function countCorners(pts: Point[]): number {
-  if (pts.length < 5) return 0;
   const step = Math.max(1, Math.floor(pts.length / 40));
   let corners = 0;
   for (let i = step; i < pts.length - step; i += step) {
-    const prev = pts[i - step];
-    const curr = pts[i];
-    const next = pts[i + step];
-    const a1 = Math.atan2(curr.y - prev.y, curr.x - prev.x);
-    const a2 = Math.atan2(next.y - curr.y, next.x - curr.x);
+    const a1 = Math.atan2(pts[i].y - pts[i - step].y, pts[i].x - pts[i - step].x);
+    const a2 = Math.atan2(pts[i + step].y - pts[i].y, pts[i + step].x - pts[i].x);
     let diff = Math.abs(a2 - a1);
     if (diff > Math.PI) diff = 2 * Math.PI - diff;
-    if (diff > 0.55) corners++; // ~31° threshold
+    if (diff > 0.55) corners++;
   }
   return corners;
 }
 
-/** Find the N most extreme vertices of a stroke by curvature / direction change. */
-function findVertices(pts: Point[], n: number): [Point, Point, Point] | null {
-  if (pts.length < 10) return null;
+function findVertices(pts: Point[]): [Point, Point, Point] | null {
   const step = Math.max(1, Math.floor(pts.length / 60));
-  const scored: Array<{ idx: number; score: number }> = [];
-
+  const scored: { idx: number; score: number }[] = [];
   for (let i = step * 2; i < pts.length - step * 2; i += step) {
-    const prev = pts[i - step * 2];
-    const curr = pts[i];
-    const next = pts[i + step * 2];
-    const a1 = Math.atan2(curr.y - prev.y, curr.x - prev.x);
-    const a2 = Math.atan2(next.y - curr.y, next.x - curr.x);
+    const a1 = Math.atan2(pts[i].y - pts[i - step * 2].y, pts[i].x - pts[i - step * 2].x);
+    const a2 = Math.atan2(pts[i + step * 2].y - pts[i].y, pts[i + step * 2].x - pts[i].x);
     let diff = Math.abs(a2 - a1);
     if (diff > Math.PI) diff = 2 * Math.PI - diff;
     if (diff > 0.5) scored.push({ idx: i, score: diff });
   }
-
-  if (scored.length < n - 1) return null;
-
-  // Deduplicate: keep highest score per cluster
+  if (scored.length < 2) return null;
   scored.sort((a, b) => b.score - a.score);
-  const minGap = Math.floor(pts.length / (n * 1.5));
+  const minGap = Math.floor(pts.length / 4);
   const picked: number[] = [];
   for (const s of scored) {
-    if (picked.every((p) => Math.abs(p - s.idx) > minGap)) {
+    if (picked.every(p => Math.abs(p - s.idx) > minGap)) {
       picked.push(s.idx);
-      if (picked.length === n - 1) break; // we also include first point
+      if (picked.length === 2) break;
     }
   }
-  if (picked.length < n - 1) return null;
-
-  const allVerts = [0, ...picked].map((i) => pts[i]);
-  if (allVerts.length < 3) return null;
-  return [allVerts[0], allVerts[1], allVerts[2]];
+  if (picked.length < 2) return null;
+  return [pts[0], pts[picked[0]], pts[picked[1]]];
 }
 
 function cornersPresent(pts: Point[], minX: number, minY: number, maxX: number, maxY: number): boolean {
-  // Threshold: a point is "at a corner" if within 22% of bounding box size
-  const threshold = Math.max((maxX - minX), (maxY - minY)) * 0.22;
-  const corners = [
-    { x: minX, y: minY }, { x: maxX, y: minY },
-    { x: minX, y: maxY }, { x: maxX, y: maxY },
-  ];
-  let found = 0;
-  corners.forEach((c) => {
-    if (pts.some((p) => distance(p, c) < threshold)) found++;
-  });
-  // Need all 4 corners for rect confidence
-  return found >= 4;
+  const threshold = Math.max(maxX - minX, maxY - minY) * 0.22;
+  const corners = [{ x: minX, y: minY }, { x: maxX, y: minY }, { x: minX, y: maxY }, { x: maxX, y: maxY }];
+  return corners.filter(c => pts.some(p => distance(p, c) < threshold)).length >= 4;
 }
 
 export function drawRecognizedShape(ctx: CanvasRenderingContext2D, shape: RecognizedShape): void {
   ctx.beginPath();
   switch (shape.type) {
-    case 'line':
-      ctx.moveTo(shape.x1, shape.y1);
-      ctx.lineTo(shape.x2, shape.y2);
-      break;
-    case 'rect':
-      ctx.rect(shape.x, shape.y, shape.w, shape.h);
-      break;
-    case 'ellipse':
-      ctx.ellipse(shape.cx, shape.cy, shape.rx, shape.ry, 0, 0, Math.PI * 2);
-      break;
+    case 'line': ctx.moveTo(shape.x1, shape.y1); ctx.lineTo(shape.x2, shape.y2); break;
+    case 'rect': ctx.rect(shape.x, shape.y, shape.w, shape.h); break;
+    case 'ellipse': ctx.ellipse(shape.cx, shape.cy, shape.rx, shape.ry, 0, 0, Math.PI * 2); break;
     case 'triangle':
       ctx.moveTo(shape.pts[0].x, shape.pts[0].y);
       ctx.lineTo(shape.pts[1].x, shape.pts[1].y);
@@ -194,67 +272,35 @@ export function drawRecognizedShape(ctx: CanvasRenderingContext2D, shape: Recogn
   ctx.stroke();
 }
 
-export function drawShapeOnCanvas(
-  ctx: CanvasRenderingContext2D,
-  tool: ToolType,
-  start: Point,
-  end: Point,
-  fill: boolean
-): void {
-  const dx = end.x - start.x;
-  const dy = end.y - start.y;
+// ── Export ────────────────────────────────────────────────────────────────────
 
-  ctx.beginPath();
-  switch (tool) {
-    case 'line':
-      ctx.moveTo(start.x, start.y);
-      ctx.lineTo(end.x, end.y);
-      break;
-    case 'rect':
-      ctx.rect(start.x, start.y, dx, dy);
-      break;
-    case 'ellipse': {
-      ctx.ellipse(
-        start.x + dx / 2,
-        start.y + dy / 2,
-        Math.abs(dx / 2),
-        Math.abs(dy / 2),
-        0, 0, Math.PI * 2
-      );
-      break;
-    }
-    case 'triangle':
-      ctx.moveTo(start.x + dx / 2, start.y);
-      ctx.lineTo(start.x, end.y);
-      ctx.lineTo(end.x, end.y);
-      ctx.closePath();
-      break;
-    case 'arrow': {
-      const angle = Math.atan2(dy, dx);
-      const len = distance(start, end);
-      const headLen = Math.min(len * 0.35, 22);
-      ctx.moveTo(start.x, start.y);
-      ctx.lineTo(end.x, end.y);
-      ctx.lineTo(end.x - headLen * Math.cos(angle - 0.45), end.y - headLen * Math.sin(angle - 0.45));
-      ctx.moveTo(end.x, end.y);
-      ctx.lineTo(end.x - headLen * Math.cos(angle + 0.45), end.y - headLen * Math.sin(angle + 0.45));
-      break;
-    }
-  }
-  ctx.stroke();
-  if (fill && tool !== 'line' && tool !== 'arrow') ctx.fill();
+export function exportCanvasAsPNG(canvas: HTMLCanvasElement, filename = 'amateurDraw.png'): void {
+  const tmp = document.createElement('canvas');
+  tmp.width = canvas.width; tmp.height = canvas.height;
+  const tc = tmp.getContext('2d')!;
+  tc.fillStyle = '#ffffff';
+  tc.fillRect(0, 0, tmp.width, tmp.height);
+  tc.drawImage(canvas, 0, 0);
+  const a = document.createElement('a');
+  a.download = filename; a.href = tmp.toDataURL('image/png'); a.click();
 }
 
-export function applyCtxSettings(
-  ctx: CanvasRenderingContext2D,
-  tool: ToolType,
-  color: string,
-  size: number,
-  opacity: number
-): void {
+export function exportSelectionAsPNG(canvas: HTMLCanvasElement, x: number, y: number, w: number, h: number, filename = 'amateurDraw-selection.png'): void {
+  const tmp = document.createElement('canvas');
+  tmp.width = w; tmp.height = h;
+  const tc = tmp.getContext('2d')!;
+  tc.fillStyle = '#ffffff';
+  tc.fillRect(0, 0, w, h);
+  tc.drawImage(canvas, x, y, w, h, 0, 0, w, h);
+  const a = document.createElement('a');
+  a.download = filename; a.href = tmp.toDataURL('image/png'); a.click();
+}
+
+// ── applyCtxSettings (used for live preview drawing) ─────────────────────────
+
+export function applyCtxSettings(ctx: CanvasRenderingContext2D, tool: ToolType, color: string, size: number, opacity: number): void {
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
-
   if (tool === 'eraser') {
     ctx.globalCompositeOperation = 'destination-out';
     ctx.strokeStyle = 'rgba(0,0,0,1)';
@@ -278,49 +324,25 @@ export function applyCtxSettings(
   }
 }
 
-export function exportCanvasAsPNG(canvas: HTMLCanvasElement, filename = 'amateurDraw.png'): void {
-  const tmp = document.createElement('canvas');
-  tmp.width = canvas.width;
-  tmp.height = canvas.height;
-  const tc = tmp.getContext('2d')!;
-  tc.fillStyle = '#ffffff';
-  tc.fillRect(0, 0, tmp.width, tmp.height);
-  tc.drawImage(canvas, 0, 0);
-  const a = document.createElement('a');
-  a.download = filename;
-  a.href = tmp.toDataURL('image/png');
-  a.click();
-}
-
-export function exportSelectionAsPNG(
-  canvas: HTMLCanvasElement,
-  x: number, y: number, w: number, h: number,
-  filename = 'amateurDraw-selection.png'
-): void {
-  const tmp = document.createElement('canvas');
-  tmp.width = Math.abs(w);
-  tmp.height = Math.abs(h);
-  const tc = tmp.getContext('2d')!;
-  tc.fillStyle = '#ffffff';
-  tc.fillRect(0, 0, tmp.width, tmp.height);
-  const sx = w < 0 ? x + w : x;
-  const sy = h < 0 ? y + h : y;
-  tc.drawImage(canvas, sx, sy, Math.abs(w), Math.abs(h), 0, 0, Math.abs(w), Math.abs(h));
-  const a = document.createElement('a');
-  a.download = filename;
-  a.href = tmp.toDataURL('image/png');
-  a.click();
-}
-
-export function clearSelectionOnCanvas(
-  ctx: CanvasRenderingContext2D,
-  x: number, y: number, w: number, h: number
-): void {
-  const sx = w < 0 ? x + w : x;
-  const sy = h < 0 ? y + h : y;
-  const prevOp = ctx.globalCompositeOperation;
-  ctx.globalCompositeOperation = 'destination-out';
-  ctx.fillStyle = 'rgba(0,0,0,1)';
-  ctx.fillRect(sx, sy, Math.abs(w), Math.abs(h));
-  ctx.globalCompositeOperation = prevOp;
+export function drawShapeOnCanvas(ctx: CanvasRenderingContext2D, tool: ToolType, start: Point, end: Point, fill: boolean): void {
+  const dx = end.x - start.x, dy = end.y - start.y;
+  ctx.beginPath();
+  switch (tool) {
+    case 'line': ctx.moveTo(start.x, start.y); ctx.lineTo(end.x, end.y); break;
+    case 'rect': ctx.rect(start.x, start.y, dx, dy); break;
+    case 'ellipse': ctx.ellipse(start.x + dx / 2, start.y + dy / 2, Math.abs(dx / 2), Math.abs(dy / 2), 0, 0, Math.PI * 2); break;
+    case 'triangle': ctx.moveTo(start.x + dx / 2, start.y); ctx.lineTo(start.x, end.y); ctx.lineTo(end.x, end.y); ctx.closePath(); break;
+    case 'arrow': {
+      const angle = Math.atan2(dy, dx);
+      const len = distance(start, end);
+      const hw = Math.min(len * 0.35, 22);
+      ctx.moveTo(start.x, start.y); ctx.lineTo(end.x, end.y);
+      ctx.lineTo(end.x - hw * Math.cos(angle - 0.45), end.y - hw * Math.sin(angle - 0.45));
+      ctx.moveTo(end.x, end.y);
+      ctx.lineTo(end.x - hw * Math.cos(angle + 0.45), end.y - hw * Math.sin(angle + 0.45));
+      break;
+    }
+  }
+  ctx.stroke();
+  if (fill && tool !== 'line' && tool !== 'arrow') ctx.fill();
 }

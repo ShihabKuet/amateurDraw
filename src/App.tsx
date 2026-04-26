@@ -17,7 +17,8 @@ export default function App() {
     undo, redo, clear, exportPNG,
     canUndo, canRedo,
     isPlacingText, textPos, placeText, cancelText,
-    selection, exportSelection, deleteSelection, clearSelection,
+    selectedId, deleteSelectedObject,
+    marquee, exportSelection, deleteSelection, clearMarquee,
   } = useDrawingCanvas(settings);
 
   return (
@@ -54,10 +55,12 @@ export default function App() {
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
-        selection={selection}
+        selectedId={selectedId}
+        onDeleteSelectedObject={deleteSelectedObject}
+        marquee={marquee}
         onExportSelection={exportSelection}
         onDeleteSelection={deleteSelection}
-        onClearSelection={clearSelection}
+        onClearMarquee={clearMarquee}
       />
       <StatusBar tool={settings.tool} mode={settings.mode} />
     </div>
