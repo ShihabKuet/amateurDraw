@@ -274,6 +274,16 @@ export function drawRecognizedShape(ctx: CanvasRenderingContext2D, shape: Recogn
 
 // ── Export ────────────────────────────────────────────────────────────────────
 
+export function measureTextBbox(text: string, fontSize: number, x: number, y: number): { x: number; y: number; w: number; h: number } {
+  const tmp = document.createElement('canvas').getContext('2d')!;
+  tmp.font = `${fontSize}px Inter, system-ui, sans-serif`;
+  const lineHeight = fontSize * 1.35;
+  const lines = text.split('\n');
+  let maxW = 0;
+  lines.forEach(l => { const w = tmp.measureText(l).width; if (w > maxW) maxW = w; });
+  return { x, y, w: Math.max(maxW, 20), h: lines.length * lineHeight };
+}
+
 export function exportCanvasAsPNG(canvas: HTMLCanvasElement, filename = 'amateurDraw.png'): void {
   const tmp = document.createElement('canvas');
   tmp.width = canvas.width; tmp.height = canvas.height;

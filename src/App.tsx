@@ -17,7 +17,10 @@ export default function App() {
     undo, redo, clear, exportPNG,
     canUndo, canRedo,
     isPlacingText, textPos, placeText, cancelText,
-    selectedId, deleteSelectedObject,
+    selectedId, selectedObject,
+    updateTextObject,
+    deleteSelectedObject,
+    deselect,
     marquee, exportSelection, deleteSelection, clearMarquee,
   } = useDrawingCanvas(settings);
 
@@ -56,7 +59,10 @@ export default function App() {
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         selectedId={selectedId}
+        selectedObject={selectedObject}
         onDeleteSelectedObject={deleteSelectedObject}
+        onDeselect={deselect}
+        onUpdateTextObject={updateTextObject}
         marquee={marquee}
         onExportSelection={exportSelection}
         onDeleteSelection={deleteSelection}
