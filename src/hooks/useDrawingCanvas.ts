@@ -16,7 +16,6 @@ import {
   bboxContains,
   uid,
   hexToRgba,
-  measureTextBbox,
 } from '../utils/canvas';
 
 const SHAPE_TOOLS = new Set(['line', 'rect', 'ellipse', 'triangle', 'arrow']);

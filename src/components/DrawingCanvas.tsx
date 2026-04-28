@@ -175,7 +175,7 @@ export function DrawingCanvas({
       {isTextSelected && selectedObject && (
         <TextPropertiesPanel
           obj={selectedObject as TextObject}
-          onUpdate={(patch) => onUpdateTextObject(selectedObject.id, patch)}
+          onUpdate={(patch: Partial<Pick<TextObject, 'text' | 'color' | 'fontSize' | 'opacity'>>) => onUpdateTextObject(selectedObject.id, patch)}
           onDelete={onDeleteSelectedObject}
           onDismiss={onDeselect}
         />
